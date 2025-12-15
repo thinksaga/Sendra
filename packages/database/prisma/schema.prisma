@@ -1,0 +1,547 @@
+// packages/database/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------
+// Enums
+// ---------------------------------------------------------
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+  READ_ONLY
+}
+
+// ---------------------------------------------------------
+// Models
+// ---------------------------------------------------------
+
+model User {
+  id             String    @id @default(uuid())
+  keycloakId     String    @unique // Link to Keycloak 'sub'
+  email          String    @unique
+  name           String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relationships
+  // Relationships
+  workspaces     WorkspaceMember[]
+  createdInvites WorkspaceInvite[]
+  notifications  Notification[]
+
+  @@index([keycloakId])
+  @@index([email])
+}
+
+model Workspace {
+  id             String    @id @default(uuid())
+  name           String
+  slug           String    @unique // For URL friendly access (e.g. app.sendra.io/workspace-slug)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relationships
+  members        WorkspaceMember[]
+  invites        WorkspaceInvite[]
+  emailAccounts  EmailAccount[]
+  campaigns      Campaign[]
+  leads          Lead[]
+  emailThreads   EmailThread[]
+  aiRequests     AIRequest[]
+  metrics        WorkspaceMetrics[]
+  plans          WorkspacePlan[]
+  usageCounters  UsageCounter[]
+  auditLogs      AuditLog[]
+  notifications  Notification[]
+  apiKeys        ApiKey[]
+  webhooks       WebhookEndpoint[]
+
+  @@index([slug])
+}
+
+model WorkspaceMember {
+  id             String        @id @default(uuid())
+  role           WorkspaceRole @default(MEMBER)
+  joinedAt       DateTime      @default(now())
+
+  // Foreign Keys
+  userId         String
+  workspaceId    String
+
+  // Relationships
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // Constraints
+  @@unique([userId, workspaceId]) // User can be in a workspace only once
+  @@index([userId])
+  @@index([workspaceId])
+}
+
+model WorkspaceInvite {
+  id             String        @id @default(uuid())
+  email          String
+  role           WorkspaceRole @default(MEMBER)
+  token          String        @unique // Secure random token
+  expiresAt      DateTime
+  acceptedAt     DateTime?     // Null if pending
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  
+  // Foreign Keys
+  workspaceId    String
+  createdById    String
+
+  // Relationships
+  workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy      User          @relation(fields: [createdById], references: [id])
+
+  // Constraints
+  @@unique([workspaceId, email]) // Only one active invite per email per workspace (simplified)
+  @@index([token])
+  @@index([workspaceId])
+}
+
+enum EmailProvider {
+  GMAIL
+  OUTLOOK
+}
+
+enum EmailAccountStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+}
+
+model EmailAccount {
+  id             String             @id @default(uuid())
+  email          String
+  provider       EmailProvider      @default(GMAIL)
+  
+  // Encrypted Tokens
+  accessToken    String
+  refreshToken   String
+  tokenExpiresAt DateTime
+  
+  status         EmailAccountStatus @default(ACTIVE)
+  warmupEnabled  Boolean            @default(false)
+  
+  // Timestamps
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  
+  // Foreign Keys
+  workspaceId    String
+  
+  // Relationships
+  workspace      Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages       EmailMessage[]
+  metrics        EmailAccountMetrics[]
+
+  // Constraints
+  @@unique([workspaceId, email]) // One connection per email per workspace
+  @@index([workspaceId])
+}
+
+model Campaign {
+  id             String         @id @default(uuid())
+  name           String
+  
+  status         CampaignStatus @default(DRAFT)
+  
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  
+  workspaceId    String
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  steps          CampaignStep[]
+  campaignLeads  CampaignLead[]
+  aiReviews      AIReview[]
+  metrics        CampaignMetrics[]
+
+  @@index([workspaceId])
+}
+
+enum CampaignStepType {
+  EMAIL
+  // LINKEDIN_CONNECTION, etc in future
+}
+
+model CampaignStep {
+  id             String           @id @default(uuid())
+  stepOrder      Int
+  type           CampaignStepType @default(EMAIL)
+  subject        String?
+  body           String?          // HTML or Text
+  delayDays      Int              @default(0) // Delay after previous step (or start)
+
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  campaignId     String
+  campaign       Campaign         @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaignLeads  CampaignLead[]
+
+  // Constraints
+  @@unique([campaignId, stepOrder]) // Order must be unique within a campaign
+  @@index([campaignId])
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  REPLIED
+  BOUNCED
+  UNSUBSCRIBED
+}
+
+model Lead {
+  id             String         @id @default(uuid())
+  email          String
+  firstName      String?
+  lastName       String?
+  company        String?
+  
+  status         LeadStatus     @default(NEW)
+  
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  workspaceId    String
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  campaigns      CampaignLead[]
+
+  @@unique([workspaceId, email])
+  @@index([workspaceId])
+}
+
+enum CampaignLeadStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  STOPPED
+}
+
+model CampaignLead {
+  id             String             @id @default(uuid())
+  
+  status         CampaignLeadStatus @default(PENDING)
+  currentStepOrder Int              @default(0) // 0 means not started
+  lastSentAt     DateTime?
+  
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  // Foreign Keys
+  campaignId     String
+  leadId         String
+  currentStepId  String?
+
+  // Relationships
+  campaign       Campaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead           Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  currentStep    CampaignStep?      @relation(fields: [currentStepId], references: [id])
+  emailThreads   EmailThread[]
+
+  // Constraints
+  @@unique([campaignId, leadId]) // Lead in campaign only once
+  @@index([campaignId])
+  @@index([leadId])
+  @@index([status])
+  @@index([campaignId, status])  // Added for "Leads to start" query
+  @@index([status, currentStepId])  // Added for "Processing Engine" query
+}
+
+enum ThreadStatus {
+  OPEN
+  INTERESTED
+  NOT_INTERESTED
+  FOLLOW_UP
+  ARCHIVED
+}
+
+model EmailThread {
+  id             String         @id @default(uuid())
+  subject        String
+  snippet        String?
+  lastMessageAt  DateTime
+  
+  status         ThreadStatus   @default(OPEN)
+  isRead         Boolean        @default(false)
+
+  // Relations
+  workspaceId    String
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  campaignLeadId String?        // Link to the campaign lead if matched
+  campaignLead   CampaignLead?  @relation(fields: [campaignLeadId], references: [id])
+  
+  messages       EmailMessage[]
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([workspaceId])
+  @@index([campaignLeadId])
+  @@index([status])
+}
+
+model EmailMessage {
+  id             String         @id @default(uuid())
+  externalId     String         @unique // Gmail ID
+  threadId       String
+  emailAccountId String
+  
+  from           String
+  to             String[]
+  subject        String
+  body           String         // Plain text usually
+  snippet        String?
+  
+  receivedAt     DateTime
+  isInbound      Boolean        @default(true) // False if we sent it
+  
+  // Relations
+  thread         EmailThread    @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  emailAccount   EmailAccount   @relation(fields: [emailAccountId], references: [id])
+
+  createdAt      DateTime       @default(now())
+  
+  @@index([threadId])
+  @@index([emailAccountId])
+}
+
+enum AIRequestType {
+  CAMPAIGN_REVIEW
+  REPLY_DRAFT
+}
+
+model AIRequest {
+  id             String         @id @default(uuid())
+  workspaceId    String
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  type           AIRequestType
+  modelUsed      String
+  inputTokens    Int
+  outputTokens   Int
+  
+  createdAt      DateTime       @default(now())
+
+  @@index([workspaceId])
+}
+
+model AIReview {
+  id             String         @id @default(uuid())
+  campaignId     String
+  campaign       Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  
+  spamScore      Int            // 1-100
+  subjectScore   Int
+  contentScore   Int
+  
+  suggestions    Json           // Array of strings or objects
+  
+  createdAt      DateTime       @default(now())
+
+  @@index([campaignId])
+}
+
+// Analytics Models (Daily Rollups)
+model CampaignMetrics {
+  id             String         @id @default(uuid())
+  campaignId     String
+  date           DateTime       // YYYY-MM-DD (Truncated)
+  
+  sentCount      Int            @default(0)
+  replyCount     Int            @default(0)
+  bounceCount    Int            @default(0)
+  errorCount     Int            @default(0)
+  
+  campaign       Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, date])
+  @@index([date])
+}
+
+model EmailAccountMetrics {
+  id             String         @id @default(uuid())
+  emailAccountId String
+  date           DateTime       // YYYY-MM-DD
+  
+  sentCount      Int            @default(0)
+  replyCount     Int            @default(0)
+  bounceCount    Int            @default(0)
+  
+  emailAccount   EmailAccount   @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([emailAccountId, date])
+}
+
+model WorkspaceMetrics {
+  id             String         @id @default(uuid())
+  workspaceId    String
+  date           DateTime       // YYYY-MM-DD
+  
+  activeCampaigns Int           @default(0)
+  activeLeads    Int            @default(0)
+  sentCount      Int            @default(0)
+  replyCount     Int            @default(0)
+  
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, date])
+}
+
+// Billing & Limits
+model Plan {
+  id             String         @id @default(uuid())
+  name           String         @unique // FREE, STARTER, GROWTH
+  
+  monthlySends   Int            @default(100)
+  inboxLimit     Int            @default(1)
+  aiLimit        Int            @default(10)
+  
+  workspaces     WorkspacePlan[]
+}
+
+model WorkspacePlan {
+  id             String         @id @default(uuid())
+  workspaceId    String         @unique
+  planId         String
+  
+  startsAt       DateTime       @default(now())
+  endsAt         DateTime?      // Null = Active/Indefinite
+  
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  plan           Plan           @relation(fields: [planId], references: [id])
+}
+
+enum UsageMetric {
+  SENDS
+  INBOXES
+  AI_REQUESTS
+}
+
+model UsageCounter {
+  id             String         @id @default(uuid())
+  workspaceId    String
+  metric         UsageMetric
+  period         String         // YYYY-MM
+  
+  count          Int            @default(0)
+  
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, metric, period])
+}
+
+// Notifications
+enum NotificationType {
+  INFO
+  WARNING
+  ERROR
+  SUCCESS
+}
+
+model Notification {
+  id             String           @id @default(uuid())
+  workspaceId    String
+  userId         String?          // Null if for whole workspace
+  
+  title          String
+  message        String
+  type           NotificationType @default(INFO)
+  
+  isRead         Boolean          @default(false)
+  link           String?
+  
+  createdAt      DateTime         @default(now())
+  
+  workspace      Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user           User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, userId])
+  @@index([userId, isRead])
+}
+model AuditLog {
+  id             String         @id @default(uuid())
+  workspaceId    String
+  
+  actorUserId    String?        // Null if system action
+  actorType      String         // USER, SYSTEM
+  action         String         // CREATE_CAMPAIGN, DELETE_USER, etc.
+  
+  entityType     String         // CAMPAIGN, LEAD, SETTINGS
+  entityId       String?
+  
+  metadata       Json?          // Diff or Details
+  
+  ipAddress      String?
+  userAgent      String?
+  
+  createdAt      DateTime       @default(now())
+  
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([entityType, entityId])
+}
+
+// Public API & Webhooks
+model ApiKey {
+  id             String         @id @default(uuid())
+  workspaceId    String
+  name           String
+  
+  hashedKey      String         @unique
+  prefix         String         // First 8 chars for display
+  
+  lastUsedAt     DateTime?
+  createdAt      DateTime       @default(now())
+  revokedAt      DateTime?
+  
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  @@index([hashedKey])
+}
+
+enum WebhookEvent {
+  REPLY_RECEIVED
+  CAMPAIGN_PAUSED
+  CAMPAIGN_COMPLETED
+  LEAD_CREATED
+}
+
+model WebhookEndpoint {
+  id             String         @id @default(uuid())
+  workspaceId    String
+  
+  url            String
+  secret         String         // For HMAC signing
+  events         WebhookEvent[]
+  active         Boolean        @default(true)
+  
+  createdAt      DateTime       @default(now())
+  
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+enum CampaignStatus {
+  DRAFT
+  RUNNING
+  PAUSED
+  COMPLETED
+  STOPPED
+}
